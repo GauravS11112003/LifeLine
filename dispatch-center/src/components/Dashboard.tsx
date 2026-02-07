@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import Link from "next/link";
 import { motion } from "framer-motion";
 import {
   Radio,
@@ -13,7 +14,7 @@ import {
   Wifi,
   WifiOff,
   Zap,
-  MonitorPlay,
+  LayoutList,
   Podcast,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -89,7 +90,7 @@ function ConnectionIndicator({ status }: { status: ConnectionStatus }) {
 }
 
 export function Dashboard() {
-  const [mode, setMode] = useState<DashboardMode>("demo");
+  const [mode, setMode] = useState<DashboardMode>("live");
 
   // Both hooks are always called (Rules of Hooks), but only one is "active"
   const mock = useMockStream(2000);
@@ -206,17 +207,13 @@ export function Dashboard() {
           <div className="flex items-center gap-4">
             {/* Mode Toggle */}
             <div className="flex items-center gap-1 rounded-full border border-border/50 p-0.5 bg-secondary/30">
-              <button
-                onClick={() => mode !== "demo" && handleModeSwitch()}
-                className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider transition-all ${
-                  mode === "demo"
-                    ? "bg-background text-dispatch-blue shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
+              <Link
+                href="/calls"
+                className="flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider transition-all bg-background text-dispatch-blue shadow-sm"
               >
-                <MonitorPlay className="h-3 w-3" />
-                Demo
-              </button>
+                <LayoutList className="h-3 w-3" />
+                Dashboard
+              </Link>
               <button
                 onClick={() => mode !== "live" && handleModeSwitch()}
                 className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider transition-all ${
