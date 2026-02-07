@@ -103,6 +103,8 @@ const MOCK_CALL: Array<{ speaker: "CALLER" | "AI" | "SYSTEM"; text: string }> = 
   { speaker: "AI", text: "Both children are safe. Burn unit and pediatric specialists are being dispatched to your location. You did the right thing calling." },
 ];
 
+const ADDRESS_REQUEST_INDEX = 3;
+
 // ── Progressive Mock Intel Snapshots ──
 // Each entry is keyed by the transcript index at which it becomes active.
 // As the call progresses, intel gets richer.
@@ -133,12 +135,7 @@ const MOCK_INTEL_SNAPSHOTS: Array<{ afterIndex: number; intel: IntelData }> = [
     intel: {
       incidentType: "Structure Fire",
       priority: "HIGH",
-      location: {
-        address: "742 EVERGREEN TERRACE",
-        lat: 40.7589,
-        lng: -73.9851,
-        sector: "SECTOR 7-G",
-      },
+      location: null,
       protocols: [
         {
           id: "fire",
@@ -160,12 +157,7 @@ const MOCK_INTEL_SNAPSHOTS: Array<{ afterIndex: number; intel: IntelData }> = [
     intel: {
       incidentType: "Structure Fire / Rescue",
       priority: "CRITICAL",
-      location: {
-        address: "742 EVERGREEN TERRACE",
-        lat: 40.7589,
-        lng: -73.9851,
-        sector: "SECTOR 7-G",
-      },
+      location: null,
       protocols: [
         {
           id: "fire",
@@ -194,12 +186,7 @@ const MOCK_INTEL_SNAPSHOTS: Array<{ afterIndex: number; intel: IntelData }> = [
     intel: {
       incidentType: "Structure Fire / Rescue / Medical",
       priority: "CRITICAL",
-      location: {
-        address: "742 EVERGREEN TERRACE",
-        lat: 40.7589,
-        lng: -73.9851,
-        sector: "SECTOR 7-G",
-      },
+      location: null,
       protocols: [
         {
           id: "fire",
@@ -241,12 +228,7 @@ const MOCK_INTEL_SNAPSHOTS: Array<{ afterIndex: number; intel: IntelData }> = [
     intel: {
       incidentType: "Structure Fire / Child Rescue",
       priority: "CRITICAL",
-      location: {
-        address: "742 EVERGREEN TERRACE",
-        lat: 40.7589,
-        lng: -73.9851,
-        sector: "SECTOR 7-G",
-      },
+      location: null,
       protocols: [
         {
           id: "fire",
@@ -289,12 +271,7 @@ const MOCK_INTEL_SNAPSHOTS: Array<{ afterIndex: number; intel: IntelData }> = [
     intel: {
       incidentType: "Structure Fire / Collapse / Child Rescue",
       priority: "CRITICAL",
-      location: {
-        address: "742 EVERGREEN TERRACE",
-        lat: 40.7589,
-        lng: -73.9851,
-        sector: "SECTOR 7-G",
-      },
+      location: null,
       protocols: [
         {
           id: "fire",
@@ -344,12 +321,7 @@ const MOCK_INTEL_SNAPSHOTS: Array<{ afterIndex: number; intel: IntelData }> = [
     intel: {
       incidentType: "Structure Fire / Gas Leak / Child Rescue",
       priority: "CRITICAL",
-      location: {
-        address: "742 EVERGREEN TERRACE",
-        lat: 40.7589,
-        lng: -73.9851,
-        sector: "SECTOR 7-G",
-      },
+      location: null,
       protocols: [
         {
           id: "fire",
@@ -400,12 +372,7 @@ const MOCK_INTEL_SNAPSHOTS: Array<{ afterIndex: number; intel: IntelData }> = [
     intel: {
       incidentType: "Structure Fire / Gas Leak / Mass Casualty",
       priority: "CRITICAL",
-      location: {
-        address: "742 EVERGREEN TERRACE",
-        lat: 40.7589,
-        lng: -73.9851,
-        sector: "SECTOR 7-G",
-      },
+      location: null,
       protocols: [
         {
           id: "fire",
@@ -550,6 +517,8 @@ export function useMockStream(intervalMs: number = 2000) {
     setIsActive((prev) => !prev);
   }, []);
 
+  const addressRequested = currentIndex >= ADDRESS_REQUEST_INDEX + 1;
+
   return {
     lines,
     isActive,
@@ -560,6 +529,7 @@ export function useMockStream(intervalMs: number = 2000) {
     detectedProtocols,
     isComplete: currentIndex >= MOCK_CALL.length,
     intel,
+    addressRequested,
     reset,
     togglePause,
   };

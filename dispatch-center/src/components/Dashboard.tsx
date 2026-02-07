@@ -122,6 +122,8 @@ export function Dashboard() {
     togglePause,
   } = stream;
 
+  const addressRequested = mode === "demo" ? mock.addressRequested : false;
+
   const connectionStatus =
     mode === "live" ? voice.connectionStatus : ("disconnected" as const);
 
@@ -392,7 +394,7 @@ export function Dashboard() {
             transition={{ duration: 0.5, delay: 0.3 }}
             className="col-span-5 min-h-0 overflow-hidden"
           >
-            <IncidentMap intel={intel} />
+            <IncidentMap intel={intel} addressRequested={addressRequested} />
           </motion.div>
         </div>
       </main>

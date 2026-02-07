@@ -1,12 +1,13 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import { motion, AnimatePresence } from "framer-motion";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { MapPin, Navigation, Crosshair } from "lucide-react";
-import type { IntelData } from "@/hooks/useMockStream";
+import type { IntelData, IntelLocation } from "@/hooks/useMockStream";
 
 // Dynamic import — Leaflet requires `window`, so disable SSR
 const MapContent = dynamic(() => import("./MapContent"), {
@@ -25,11 +26,60 @@ const MapContent = dynamic(() => import("./MapContent"), {
 
 interface IncidentMapProps {
   intel: IntelData | null;
+  addressRequested?: boolean;
 }
 
-export function IncidentMap({ intel }: IncidentMapProps) {
-  const location = intel?.location;
+const PLACEHOLDER_ADDRESS = "17 Brook Meadows Cir, Tuscaloosa, Alabama";
+
+export function IncidentMap({ intel, addressRequested = false }: IncidentMapProps) {
+  const [fallbackLocation, setFallbackLocation] = useState<IntelLocation | null>(null);
+  const location = addressRequested
+    ? fallbackLocation
+    : intel?.location ?? fallbackLocation;
   const hasLocation = !!(location && location.address !== "PENDING");
+
+  useEffect(() => {
+    let isActive = true;
+
+    if (!addressRequested || fallbackLocation) {
+      return () => {
+        isActive = false;
+      };
+    }
+
+    const url = new URL("https://photon.komoot.io/api/");
+    url.searchParams.set("q", PLACEHOLDER_ADDRESS);
+    url.searchParams.set("limit", "1");
+
+    fetch(url.toString())
+      .then((response) => response.json())
+      .then((data) => {
+        if (!isActive) return;
+        const feature = data?.features?.[0];
+        const coords = feature?.geometry?.coordinates;
+        if (coords?.length === 2) {
+          setFallbackLocation({
+            address: feature?.properties?.name || PLACEHOLDER_ADDRESS,
+            lat: coords[1],
+            lng: coords[0],
+            sector: "AUTO",
+          });
+        }
+      })
+      .catch(() => {
+        if (!isActive) return;
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [addressRequested, fallbackLocation]);
+
+  useEffect(() => {
+    if (!addressRequested && fallbackLocation) {
+      setFallbackLocation(null);
+    }
+  }, [addressRequested, fallbackLocation]);
 
   return (
     <Card className={`glass-panel h-full flex flex-col overflow-hidden transition-colors duration-500 ${hasLocation ? "border-dispatch-red/20" : ""}`}>
@@ -58,7 +108,7 @@ export function IncidentMap({ intel }: IncidentMapProps) {
       {/* Map Area */}
       <CardContent className="p-2 flex-1 min-h-0 relative">
         <div className="w-full h-full rounded-lg overflow-hidden relative">
-          <MapContent intel={intel} />
+          <MapContent intel={intel} locationOverride={fallbackLocation} />
 
           {/* Coordinate overlay */}
           <AnimatePresence>
