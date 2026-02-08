@@ -4,7 +4,7 @@ import { useEffect, useRef } from "react";
 import { MapContainer, TileLayer, Marker, Circle, useMap } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import type { IntelData, IntelLocation } from "@/hooks/useMockStream";
+import type { IntelData } from "@/hooks/useMockStream";
 
 // ──── Custom pulsing marker icon ────
 const incidentIcon = L.divIcon({
@@ -57,12 +57,11 @@ function MapUpdater({ lat, lng, hasLocation }: { lat: number; lng: number; hasLo
 // ──── Main Map Component ────
 interface MapContentProps {
   intel: IntelData | null;
-  locationOverride?: IntelLocation | null;
 }
 
-export default function MapContent({ intel, locationOverride }: MapContentProps) {
+export default function MapContent({ intel }: MapContentProps) {
   const mapRef = useRef<L.Map | null>(null);
-  const location = intel?.location ?? locationOverride;
+  const location = intel?.location;
   const hasLocation = !!(location && location.address !== "PENDING");
 
   const lat = location?.lat || 40.7128;

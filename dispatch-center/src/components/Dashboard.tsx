@@ -15,6 +15,7 @@ import {
   WifiOff,
   Zap,
   LayoutList,
+  MonitorPlay,
   Podcast,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -123,7 +124,6 @@ export function Dashboard() {
     togglePause,
   } = stream;
 
-  const addressRequested = mode === "demo" ? mock.addressRequested : false;
 
   const connectionStatus =
     mode === "live" ? voice.connectionStatus : ("disconnected" as const);
@@ -207,6 +207,17 @@ export function Dashboard() {
           <div className="flex items-center gap-4">
             {/* Mode Toggle */}
             <div className="flex items-center gap-1 rounded-full border border-border/50 p-0.5 bg-secondary/30">
+              <button
+                onClick={() => mode !== "demo" && handleModeSwitch()}
+                className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider transition-all ${
+                  mode === "demo"
+                    ? "bg-background text-dispatch-blue shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <MonitorPlay className="h-3 w-3" />
+                Demo
+              </button>
               <Link
                 href="/calls"
                 className="flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-mono uppercase tracking-wider transition-all bg-background text-dispatch-blue shadow-sm"
@@ -391,7 +402,7 @@ export function Dashboard() {
             transition={{ duration: 0.5, delay: 0.3 }}
             className="col-span-5 min-h-0 overflow-hidden"
           >
-            <IncidentMap intel={intel} addressRequested={addressRequested} />
+            <IncidentMap intel={intel} />
           </motion.div>
         </div>
       </main>
