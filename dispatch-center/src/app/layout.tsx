@@ -15,7 +15,7 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Dispatch Command Center",
+  title: "Lifeline",
   description: "Mission Critical Dispatch Interface — Real-time 911 Call Processing",
 };
 

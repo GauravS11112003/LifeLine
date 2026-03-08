@@ -1,6 +1,5 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -10,22 +9,17 @@ import {
   Shield,
   Flame,
   HeartPulse,
-  Truck,
   AlertTriangle,
-  Siren,
-  Clock,
   Users,
   Zap,
   ChevronRight,
-  Radio,
   Crosshair,
-  Skull,
   Car,
   Home,
   FileText,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import type { IntelData, IntelProtocol, IntelResource } from "@/hooks/useMockStream";
+import type { IntelData, IntelProtocol } from "@/hooks/useMockStream";
 
 interface IntelDeckProps {
   detectedProtocols: string[];
@@ -66,23 +60,6 @@ function getProtocolStyle(id: string): ProtocolStyle {
   return PROTOCOL_STYLE_MAP[id] || DEFAULT_PROTOCOL_STYLE;
 }
 
-function getResourceIcon(type: string): { icon: LucideIcon; color: string } {
-  switch (type) {
-    case "Fire": return { icon: Flame, color: "text-orange-400" };
-    case "EMS": return { icon: HeartPulse, color: "text-red-400" };
-    case "Police": return { icon: Shield, color: "text-blue-400" };
-    case "HazMat": return { icon: Skull, color: "text-yellow-400" };
-    case "Special": return { icon: Truck, color: "text-purple-400" };
-    default: return { icon: Siren, color: "text-gray-400" };
-  }
-}
-
-function formatEta(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return `${m}:${s.toString().padStart(2, "0")}`;
-}
-
 function PriorityBadge({ priority }: { priority: string }) {
   const colors: Record<string, string> = {
     CRITICAL: "bg-red-500/20 text-red-400 border-red-500/30",
@@ -95,16 +72,6 @@ function PriorityBadge({ priority }: { priority: string }) {
       {priority}
     </span>
   );
-}
-
-function statusColor(status: string): string {
-  switch (status) {
-    case "On Scene": return "text-dispatch-green";
-    case "En Route": return "text-dispatch-amber";
-    case "Staged": return "text-dispatch-blue";
-    case "Dispatched": return "text-dispatch-cyan";
-    default: return "text-muted-foreground";
-  }
 }
 
 // ──── Main Unified Intel Deck ────
@@ -121,56 +88,7 @@ export function IntelDeck({ detectedProtocols, intel }: IntelDeckProps) {
           priority: "HIGH" as const,
         }));
 
-  // Resources with ETA countdown
-  const [resources, setResources] = useState<IntelResource[]>([]);
-
-  useEffect(() => {
-    if (intel?.resources && intel.resources.length > 0) {
-      setResources((prev) => {
-        const merged = new Map<string, IntelResource>();
-        for (const r of prev) merged.set(r.id, r);
-        for (const r of intel.resources) {
-          const existing = merged.get(r.id);
-          if (existing) {
-            if (r.status === "On Scene") {
-              merged.set(r.id, { ...r, eta: null });
-            } else if (r.eta !== null && r.eta !== undefined) {
-              const existingEta = existing.eta;
-              merged.set(r.id, {
-                ...r,
-                eta: existingEta !== null && existingEta !== undefined && existingEta < r.eta ? existingEta : r.eta,
-              });
-            } else {
-              merged.set(r.id, r);
-            }
-          } else {
-            merged.set(r.id, r);
-          }
-        }
-        return Array.from(merged.values());
-      });
-    }
-  }, [intel]);
-
-  useEffect(() => {
-    if (resources.length === 0) return;
-    const interval = setInterval(() => {
-      setResources((prev) =>
-        prev.map((r) => {
-          if (r.eta === null || r.eta === undefined || r.eta <= 0) {
-            return r.eta !== null && r.eta !== undefined && r.eta <= 0
-              ? { ...r, eta: null, status: "On Scene" as const }
-              : r;
-          }
-          return { ...r, eta: r.eta - 1 };
-        })
-      );
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [resources.length]);
-
-  const totalActive = protocols.length + resources.length;
-  const hasContent = totalActive > 0;
+  const hasContent = protocols.length > 0;
 
   return (
     <Card className="glass-panel h-full flex flex-col overflow-hidden min-h-0">
@@ -183,11 +101,6 @@ export function IntelDeck({ detectedProtocols, intel }: IntelDeckProps) {
             {protocols.length > 0 && (
               <Badge variant="destructive" className="text-[9px] h-4 px-1.5">
                 {protocols.length} PROTO
-              </Badge>
-            )}
-            {resources.length > 0 && (
-              <Badge variant="secondary" className="text-[9px] h-4 px-1.5">
-                {resources.length} UNITS
               </Badge>
             )}
           </div>
@@ -261,69 +174,6 @@ export function IntelDeck({ detectedProtocols, intel }: IntelDeckProps) {
                               </p>
                             </div>
                             <ChevronRight className={`h-3.5 w-3.5 mt-0.5 ${style.color} opacity-40`} />
-                          </div>
-                        </motion.div>
-                      );
-                    })}
-                  </AnimatePresence>
-                </div>
-              </div>
-            )}
-
-            {/* ── Divider ── */}
-            {protocols.length > 0 && resources.length > 0 && (
-              <Separator className="opacity-20" />
-            )}
-
-            {/* ── Dispatched Resources ── */}
-            {resources.length > 0 && (
-              <div>
-                <p className="text-[9px] font-mono text-dispatch-cyan uppercase tracking-widest mb-2 flex items-center gap-1.5">
-                  <Radio className="h-3 w-3" />
-                  Dispatched Resources
-                </p>
-                <div className="space-y-1">
-                  <AnimatePresence mode="popLayout">
-                    {resources.map((resource, index) => {
-                      const { icon: Icon, color } = getResourceIcon(resource.type);
-                      return (
-                        <motion.div
-                          key={resource.id}
-                          initial={{ opacity: 0, y: 15 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          exit={{ opacity: 0, y: -10 }}
-                          transition={{ delay: index * 0.03, duration: 0.25 }}
-                          className="flex items-center gap-2.5 p-1.5 rounded-md hover:bg-secondary/30 transition-colors"
-                        >
-                          <div className={`rounded-md p-1 bg-secondary/50 ${color}`}>
-                            <Icon className="h-3 w-3" />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-1.5">
-                              <span className="text-[11px] font-semibold text-foreground">
-                                {resource.unit}
-                              </span>
-                              <span className="text-[8px] font-mono text-muted-foreground uppercase">
-                                {resource.type}
-                              </span>
-                            </div>
-                            <span className={`text-[9px] font-mono uppercase ${statusColor(resource.status)}`}>
-                              {resource.status}
-                            </span>
-                          </div>
-                          <div className="text-right flex-shrink-0">
-                            {resource.eta !== null && resource.eta !== undefined ? (
-                              <div className="flex items-center gap-1 text-dispatch-amber">
-                                <Clock className="h-2.5 w-2.5" />
-                                <span className="text-[11px] font-mono font-bold">
-                                  {formatEta(resource.eta)}
-                                </span>
-                              </div>
-                            ) : (
-                              <span className="text-[9px] font-mono text-dispatch-green font-bold">
-                                ARRIVED
-                              </span>
-                            )}
                           </div>
                         </motion.div>
                       );

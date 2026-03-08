@@ -79,9 +79,13 @@ export function useVoiceStream(wsUrl: string = VOICE_AGENT_WS) {
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttemptRef = useRef(0);
   const durationRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lineCountRef = useRef(0);
   const shouldConnectRef = useRef(false);
+
+  const MAX_RECONNECT_DELAY_MS = 10000;
+  const INITIAL_RECONNECT_DELAY_MS = 1000;
 
   // ── Connect ──
   const connect = useCallback(() => {
@@ -103,6 +107,7 @@ export function useVoiceStream(wsUrl: string = VOICE_AGENT_WS) {
       wsRef.current = ws;
 
       ws.onopen = () => {
+        reconnectAttemptRef.current = 0;
         setConnectionStatus("connected");
       };
 
@@ -156,7 +161,14 @@ export function useVoiceStream(wsUrl: string = VOICE_AGENT_WS) {
                 keywords: finalSpeaker === "SYSTEM" ? [] : keywords,
               };
 
-              setLines((prev) => [...prev, newLine]);
+              // Deduplicate: skip if the last line has the same speaker + text
+              setLines((prev) => {
+                const last = prev[prev.length - 1];
+                if (last && last.speaker === newLine.speaker && last.text === newLine.text) {
+                  return prev;
+                }
+                return [...prev, newLine];
+              });
 
               if (keywords.length > 0 && finalSpeaker !== "SYSTEM") {
                 setDetectedProtocols((prev) => {
@@ -183,7 +195,13 @@ export function useVoiceStream(wsUrl: string = VOICE_AGENT_WS) {
                 }),
                 keywords: [],
               };
-              setLines((prev) => [...prev, sysLine]);
+              setLines((prev) => {
+                const last = prev[prev.length - 1];
+                if (last && last.speaker === "SYSTEM" && last.text === sysLine.text) {
+                  return prev;
+                }
+                return [...prev, sysLine];
+              });
               break;
             }
 
@@ -211,18 +229,30 @@ export function useVoiceStream(wsUrl: string = VOICE_AGENT_WS) {
       };
 
       ws.onclose = () => {
+        // If a newer socket replaced this one (e.g. Strict Mode remount),
+        // ignore the stale close to avoid clobbering the active connection.
+        if (wsRef.current !== ws) return;
+
         setConnectionStatus("disconnected");
         wsRef.current = null;
 
-        // Auto-reconnect if we should still be connected
+        // Auto-reconnect with exponential backoff
         if (shouldConnectRef.current) {
+          const delay = Math.min(
+            INITIAL_RECONNECT_DELAY_MS * Math.pow(2, reconnectAttemptRef.current),
+            MAX_RECONNECT_DELAY_MS
+          );
+          reconnectAttemptRef.current += 1;
           reconnectRef.current = setTimeout(() => {
+            reconnectRef.current = null;
             connect();
-          }, 3000);
+          }, delay);
         }
       };
 
       ws.onerror = () => {
+        // Ignore errors from stale sockets
+        if (wsRef.current !== ws) return;
         setConnectionStatus("error");
       };
     } catch {
@@ -233,6 +263,7 @@ export function useVoiceStream(wsUrl: string = VOICE_AGENT_WS) {
   // ── Disconnect ──
   const disconnect = useCallback(() => {
     shouldConnectRef.current = false;
+    reconnectAttemptRef.current = 0;
 
     if (reconnectRef.current) {
       clearTimeout(reconnectRef.current);

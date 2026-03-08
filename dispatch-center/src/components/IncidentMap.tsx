@@ -24,12 +24,13 @@ const MapContent = dynamic(() => import("./MapContent"), {
 });
 
 interface IncidentMapProps {
-  intel: IntelData | null;
+  intel: (IntelData & { pendingAddress?: string | null }) | null;
 }
 
 export function IncidentMap({ intel }: IncidentMapProps) {
   const location = intel?.location;
   const hasLocation = !!(location && location.address !== "PENDING");
+  const pendingAddress = !hasLocation && intel?.pendingAddress;
 
   return (
     <Card className={`glass-panel h-full flex flex-col overflow-hidden transition-colors duration-500 ${hasLocation ? "border-dispatch-red/20" : ""}`}>
@@ -76,7 +77,7 @@ export function IncidentMap({ intel }: IncidentMapProps) {
                       <Navigation className="h-3.5 w-3.5 text-dispatch-red" />
                     </div>
                     <span className="text-sm font-bold text-foreground font-mono tracking-wide">
-                      {location.address}, USA
+                      {location.address}
                     </span>
                   </div>
                   {/* Details row */}
@@ -101,7 +102,7 @@ export function IncidentMap({ intel }: IncidentMapProps) {
             )}
           </AnimatePresence>
 
-          {/* "Awaiting" overlay when no location */}
+          {/* "Awaiting / Geocoding" overlay when no location */}
           <AnimatePresence>
             {!hasLocation && (
               <motion.div
@@ -112,12 +113,17 @@ export function IncidentMap({ intel }: IncidentMapProps) {
               >
                 <div className="flex flex-col items-center gap-2">
                   <div className="relative">
-                    <div className="w-16 h-16 rounded-full border-2 border-dashed border-muted-foreground/20 animate-spin" style={{ animationDuration: "8s" }} />
-                    <MapPin className="h-5 w-5 text-muted-foreground/30 absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
+                    <div className={`w-16 h-16 rounded-full border-2 border-dashed animate-spin ${pendingAddress ? "border-dispatch-amber/40" : "border-muted-foreground/20"}`} style={{ animationDuration: pendingAddress ? "3s" : "8s" }} />
+                    <MapPin className={`h-5 w-5 absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 ${pendingAddress ? "text-dispatch-amber/60 animate-pulse" : "text-muted-foreground/30"}`} />
                   </div>
                   <span className="text-[10px] font-mono text-muted-foreground/40 uppercase tracking-widest">
-                    Awaiting Location Intel
+                    {pendingAddress ? "Geocoding Address..." : "Awaiting Location Intel"}
                   </span>
+                  {pendingAddress && (
+                    <span className="text-[9px] font-mono text-dispatch-amber/60 max-w-[200px] text-center truncate">
+                      {intel?.pendingAddress}
+                    </span>
+                  )}
                 </div>
               </motion.div>
             )}

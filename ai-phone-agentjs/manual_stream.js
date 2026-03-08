@@ -34,8 +34,8 @@ fastify.all('/incoming-call', async (request, reply) => {
 
 const start = async () => {
     try {
-        await fastify.listen({ port: PORT || 5000 });
-        console.log(`Server listening on port ${PORT || 5000}`);
+        await fastify.listen({ port: PORT || 5050 });
+        console.log(`Server listening on port ${PORT || 5050}`);
 
         const wss = new WebSocketServer({ server: fastify.server });
 

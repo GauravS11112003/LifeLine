@@ -2,11 +2,14 @@ import Fastify from 'fastify';
 import fastifyFormBody from '@fastify/formbody';
 import dotenv from 'dotenv';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import axios from 'axios'; 
+import axios from 'axios';
 import { WebSocketServer } from 'ws';
+import Sentiment from 'sentiment';
+import { initCall, setStreamSid, saveMessage, updateCallSummary, endCall } from './firebase.js';
 
 // Load keys
 dotenv.config();
+const sentiment = new Sentiment();
 const { GOOGLE_API_KEY, ELEVENLABS_API_KEY, PORT } = process.env;
 
 // Initialize Gemini
@@ -21,10 +24,16 @@ const model = genAI.getGenerativeModel({
 const fastify = Fastify();
 fastify.register(fastifyFormBody);
 
-const NGROK_URL = "nonaphetic-stephnie-thetically.ngrok-free.dev"; 
+// If Twilio gets 403 on the webhook, ngrok free tier may block non-browser requests;
+// use a paid tunnel or host (e.g. Railway, Render) for production.
+// Use PUBLIC_DOMAIN or NGROK_URL from .env (hostname only, no https://)
+const NGROK_URL = (process.env.PUBLIC_DOMAIN || process.env.NGROK_URL || "regionalistic-elsie-heuristically.ngrok-free.dev").replace(/^https?:\/\//, "").trim(); 
 
 // SESSION TRACKING
 let conversationLog = "";
+let lastCallerTranscript = ""; // Dedupe: avoid repeating same caller line and AI reply
+let lastIncomingAnnounceAt = 0; // Dedupe: only send SYSTEM "INCOMING..." once per burst (Twilio may POST twice)
+let firstAiGreetingSentForCall = false; // Dedupe: only send "911, What is your emergency?" once per call
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // DASHBOARD WEBSOCKET CONNECTIONS - Real-time UI updates
@@ -54,14 +63,44 @@ fastify.get('/', async (request, reply) => {
     reply.send({ message: 'Twilio 911 AI Server Running!' });
 });
 
+// Normalize Twilio From to a displayable phone string (digits or E.164)
+function normalizeCallerPhone(from) {
+    if (from == null || typeof from !== 'string') return null;
+    const raw = String(from).trim();
+    if (!raw) return null;
+    const digits = raw.replace(/\D/g, '');
+    if (digits.length >= 10) {
+        const last10 = digits.slice(-10);
+        return `(${last10.slice(0, 3)}) ${last10.slice(3, 6)}-${last10.slice(6)}`;
+    }
+    return raw;
+}
+
 // Incoming Call Route
 fastify.all('/incoming-call', async (request, reply) => {
     conversationLog = ""; // Reset history
+    lastCallerTranscript = "";
+    firstAiGreetingSentForCall = false; // New call: allow first AI greeting once when stream starts
     const streamUrl = `wss://${NGROK_URL}/media-stream`;
-    console.log(`📞 New Call! Connecting to: ${streamUrl}`);
+    const callId = `call_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    // Twilio sends POST with application/x-www-form-urlencoded body; some configs use GET with query params. Merge both.
+    const query = request.query || {};
+    const body = request.body || {};
+    const payload = { ...query, ...body };
+    const rawFrom = payload.From ?? payload.from ?? payload.Caller ?? payload.CallerId;
+    const callerPhone = normalizeCallerPhone(rawFrom);
+    if (rawFrom != null) console.log(`📞 Twilio From (raw): ${String(rawFrom).replace(/\d(?=\d{4})/g, '*')}`);
+    if (callerPhone) console.log(`📞 Caller (saved): ${callerPhone}`);
+    if (!callerPhone && (request.method === 'POST' && Object.keys(body).length === 0)) {
+        console.warn('⚠️ POST body empty – ensure @fastify/formbody is registered and Twilio sends application/x-www-form-urlencoded');
+    }
+    console.log(`📞 New Call! callId=${callId} Connecting to: ${streamUrl}`);
+
+    await initCall(callId, { callerPhone });
 
     // Notify dashboard of incoming call
     currentCallState = {
+        callId,
         isActive: true,
         streamSid: null,
         startTime: Date.now(),
@@ -75,23 +114,31 @@ fastify.all('/incoming-call', async (request, reply) => {
         }
     };
     
-    broadcastToDashboard({
-        type: 'call_start',
-        timestamp: new Date().toISOString()
-    });
-    
-    broadcastToDashboard({
-        type: 'transcript',
-        speaker: 'SYSTEM',
-        text: '── INCOMING 911 CALL ── PRIORITY: UNKNOWN ──',
-        timestamp: new Date().toISOString()
-    });
+    // Dedupe: Twilio may POST /incoming-call twice; only send call_start + SYSTEM once per ~5s
+    const now = Date.now();
+    if (now - lastIncomingAnnounceAt > 5000) {
+        lastIncomingAnnounceAt = now;
+        broadcastToDashboard({
+            type: 'call_start',
+            timestamp: new Date().toISOString()
+        });
+        broadcastToDashboard({
+            type: 'transcript',
+            speaker: 'SYSTEM',
+            text: '── INCOMING 911 CALL ── PRIORITY: UNKNOWN ──',
+            timestamp: new Date().toISOString()
+        });
+    }
 
+    // Pass caller phone in Stream URL so Twilio echoes it in stream start customParameters (fallback for contactNumber)
+    const streamUrlWithParams = callerPhone
+        ? `${streamUrl}?callerPhone=${encodeURIComponent(callerPhone)}`
+        : streamUrl;
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Say>911, What is your emergency?</Say>
         <Connect>
-            <Stream url="${streamUrl}" />
+            <Stream url="${streamUrlWithParams}" />
         </Connect>
     </Response>`;
 
@@ -101,7 +148,7 @@ fastify.all('/incoming-call', async (request, reply) => {
 // --- START SERVER ---
 const start = async () => {
     try {
-        const port = PORT || 5000;
+        const port = Number(PORT) || 5050;
         await fastify.listen({ port: port, host: '0.0.0.0' });
         console.log(`🚀 Server listening on port ${port}`);
         console.log(`📡 Dashboard WebSocket available at ws://localhost:${port}/dashboard`);
@@ -134,13 +181,18 @@ const start = async () => {
         wss.on('dashboard-connection', (ws) => {
             console.log('🖥️  Dashboard client connected');
             dashboardClients.add(ws);
-            
+
+            // Keep connection alive so it isn't dropped by idle timeouts
+            const pingInterval = setInterval(() => {
+                if (ws.readyState === 1) ws.ping();
+            }, 25000);
+
             // Send current state to newly connected client
-            ws.send(JSON.stringify({ 
+            ws.send(JSON.stringify({
                 type: 'connected',
                 timestamp: new Date().toISOString()
             }));
-            
+
             // If there's an active call, send current state
             if (currentCallState.isActive) {
                 ws.send(JSON.stringify({
@@ -155,13 +207,15 @@ const start = async () => {
                     }));
                 }
             }
-            
+
             ws.on('close', () => {
+                clearInterval(pingInterval);
                 console.log('🖥️  Dashboard client disconnected');
                 dashboardClients.delete(ws);
             });
-            
+
             ws.on('error', (err) => {
+                clearInterval(pingInterval);
                 console.error('Dashboard WebSocket error:', err);
                 dashboardClients.delete(ws);
             });
@@ -179,10 +233,12 @@ const start = async () => {
             let isProcessing = false;
             let callActive = true;
             let lastVolumeUpdate = 0;
+            let lastProcessedAt = 0;
 
             // --- TUNING SETTINGS ---
-            const SILENCE_THRESHOLD = 200; 
+            const SILENCE_THRESHOLD = 200;
             const SILENCE_DURATION = 250; // 5 Seconds
+            const PROCESS_COOLDOWN_MS = 3000; // Min gap between processing to avoid same utterance repeated
 
             ws.on('message', async (message) => {
                 if (!callActive) return;
@@ -193,15 +249,29 @@ const start = async () => {
                     if (data.event === 'start') {
                         streamSid = data.start.streamSid;
                         currentCallState.streamSid = streamSid;
+                        if (currentCallState.callId) {
+                            setStreamSid(currentCallState.callId, streamSid);
+                            // Fallback: set contactNumber from stream custom params if webhook didn't provide it
+                            const customParams = data.start.customParameters || data.start.custom_params;
+                            const streamPhone = customParams?.callerPhone ?? customParams?.From ?? customParams?.from;
+                            if (streamPhone) {
+                                const normalized = normalizeCallerPhone(streamPhone);
+                                if (normalized) {
+                                    updateCallSummary(currentCallState.callId, { contactNumber: normalized }).catch(() => {});
+                                }
+                            }
+                        }
                         console.log(`📡 Stream started: ${streamSid}`);
-                        
-                        // Send initial AI greeting to dashboard
-                        broadcastToDashboard({
-                            type: 'transcript',
-                            speaker: 'AI',
-                            text: '911, What is your emergency?',
-                            timestamp: new Date().toISOString()
-                        });
+                        // Send initial AI greeting once per call (Twilio may open multiple stream connections)
+                        if (!firstAiGreetingSentForCall) {
+                            firstAiGreetingSentForCall = true;
+                            broadcastToDashboard({
+                                type: 'transcript',
+                                speaker: 'AI',
+                                text: '911, What is your emergency?',
+                                timestamp: new Date().toISOString()
+                            });
+                        }
                     } 
                     else if (data.event === 'media') {
                         if (isProcessing) return;
@@ -231,16 +301,17 @@ const start = async () => {
                             silentChunks++;   
                         }
 
-                        if (silentChunks > SILENCE_DURATION && audioBuffer.length > 20) {
+                        const cooldownPassed = Date.now() - lastProcessedAt >= PROCESS_COOLDOWN_MS;
+                        if (silentChunks > SILENCE_DURATION && audioBuffer.length > 20 && cooldownPassed) {
                             console.log('🗣️ User silence detected. Processing turn...');
-                            
+                            lastProcessedAt = Date.now();
                             isProcessing = true;
                             const completeAudio = Buffer.concat(audioBuffer);
                             audioBuffer = [];
                             silentChunks = 0;
 
                             // Process the audio and check if we should end the call
-                            const shouldEnd = await processAudio(completeAudio, ws, streamSid);
+                            const shouldEnd = await processAudio(completeAudio, ws, streamSid, currentCallState.callId);
                             
                             if (shouldEnd) {
                                 callActive = false;
@@ -268,6 +339,7 @@ const start = async () => {
                     else if (data.event === 'stop') {
                         console.log('🛑 Stream Stopped');
                         currentCallState.isActive = false;
+                        if (currentCallState.callId) endCall(currentCallState.callId, currentCallState.intel?.summary);
                         
                         broadcastToDashboard({
                             type: 'call_end',
@@ -291,6 +363,7 @@ const start = async () => {
                 console.log('❌ Twilio Client Disconnected');
                 if (currentCallState.isActive) {
                     currentCallState.isActive = false;
+                    if (currentCallState.callId) endCall(currentCallState.callId, currentCallState.intel?.summary);
                     broadcastToDashboard({
                         type: 'call_end',
                         timestamp: new Date().toISOString()
@@ -312,7 +385,7 @@ const start = async () => {
 
 // --- AI PROCESSING ---
 
-async function processAudio(audioData, ws, streamSid) {
+async function processAudio(audioData, ws, streamSid, callId) {
     try {
         const wavHeader = createWavHeader(audioData.length);
         const wavBuffer = Buffer.concat([wavHeader, audioData]);
@@ -325,6 +398,10 @@ async function processAudio(audioData, ws, streamSid) {
             You are a 911 Emergency Dispatcher.
             Your manner must be: Calm, Authoritative, and Concise.
 
+            LANGUAGE PROTOCOL:
+            - If the user speaks a different language, REPLY IN THAT SAME LANGUAGE.
+            - Detect the language automatically.
+
             CURRENT CONVERSATION HISTORY:
             ${conversationLog}
 
@@ -335,9 +412,17 @@ async function processAudio(audioData, ws, streamSid) {
             4. Extract any location/address mentioned.
             5. Determine the priority level based on severity.
             
-            **TERMINATION PROTOCOL (CRITICAL):**
-            - If you have gathered the Location and Nature of the emergency, ask: "Is there any other information I should know?"
-            - If the user says "No", "That's it", or "Nope" to that question:
+             *CRITICAL "ONE-SHOT" RULE (TO PREVENT LOOPS):*
+            - You are allowed to ask for a checklist item *ONLY ONCE*.
+            - If the user's answer is unclear, irrelevant, repeats your question, or is "I don't know":
+              *DO NOT ASK AGAIN.* Mark that item as "Unknown" and IMMEDIATELY move to the next item or finalize the call.
+            - NEVER repeat the exact same question twice in a row.
+            - If your generated reply matches the user's input (an echo), change it to "I heard you. Please continue."
+
+            
+            *TERMINATION PROTOCOL:*
+            - If you have attempted to get Location and Nature (even if failed), ask: "Is there any other information I should know?"
+            - If the user says "No" (or similar):
                 - REPLY: "Okay, help is on the way. Stay on the line."
                 - SET 'is_final': true
             
@@ -351,12 +436,15 @@ async function processAudio(audioData, ws, streamSid) {
 
             [SCENARIO C: KIDNAPPING]
             Checklist: Location -> Time -> Suspect/Vehicle Info
+
             
             [SCENARIO D: FIRE]
             Checklist: Location -> People Inside -> Injuries
 
             [SCENARIO E: ASSAULT/VIOLENCE]
             Checklist: Location -> Weapon -> Injuries -> Suspect Info
+
+            6. Assess the caller's emotional state (sentiment) from tone and words: calm, distressed, anxious, angry, fearful, neutral.
 
             --- OUTPUT FORMAT ---
             Return a JSON object:
@@ -365,29 +453,99 @@ async function processAudio(audioData, ws, streamSid) {
               "scenario_detected": "ROBBERY | MEDICAL | KIDNAPPING | FIRE | ASSAULT | GENERAL",
               "reply": "Your response",
               "is_final": boolean (true ONLY if you are saying goodbye/dispatching),
+              "caller_sentiment": "calm | distressed | anxious | angry | fearful | neutral",
+              "main_concern": "One short phrase: the primary emergency or concern stated in this turn, or null",
               "intel": {
                 "location_mentioned": "any address or location mentioned, or null",
                 "priority": "LOW | MEDIUM | HIGH | CRITICAL",
                 "injuries_reported": boolean,
                 "weapons_involved": boolean,
                 "people_in_danger": boolean,
-                "key_details": "Brief summary of what you know so far"
+                "key_details": "Brief running summary of what you know so far (2-3 sentences)"
               }
             }
         `;
 
-        const result = await model.generateContent([
-            systemPrompt,
-            {
-                inlineData: {
-                    mimeType: "audio/wav",
-                    data: base64Audio
+        // Retry Gemini on 429 with exponential backoff
+        const maxRetries = 3;
+        let result;
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                result = await model.generateContent([
+                    systemPrompt,
+                    {
+                        inlineData: {
+                            mimeType: "audio/wav",
+                            data: base64Audio
+                        }
+                    }
+                ]);
+                break;
+            } catch (genError) {
+                const is429 = genError.message?.includes('429') || genError.response?.status === 429;
+                if (is429 && attempt < maxRetries - 1) {
+                    const delayMs = Math.min(2000 * Math.pow(2, attempt), 10000);
+                    console.warn(`⚠️ Gemini 429, retrying in ${delayMs}ms (attempt ${attempt + 1}/${maxRetries})`);
+                    await new Promise((r) => setTimeout(r, delayMs));
+                } else {
+                    throw genError;
                 }
             }
-        ]);
+        }
 
         const responseText = result.response.text();
-        const responseJson = JSON.parse(responseText); 
+        const responseJson = JSON.parse(responseText);
+
+        // Dedupe: if caller said the exact same thing again, don't repeat AI reply
+        const transcriptNorm = (responseJson.transcript || '').trim().toLowerCase();
+        if (transcriptNorm && transcriptNorm === lastCallerTranscript.trim().toLowerCase()) {
+            console.log('🔄 Duplicate caller transcript ignored:', responseJson.transcript);
+            const cannedReply = "I heard you. Please continue with your location, including city and state.";
+            broadcastToDashboard({
+                type: 'transcript',
+                speaker: 'AI',
+                text: cannedReply,
+                timestamp: new Date().toISOString()
+            });
+            // TTS for canned reply (reuse same TTS block with cannedReply)
+            const voiceId = "JBFqnCBsd6RMkjVDRZzb";
+            try {
+                const ttsResponse = await axios({
+                    method: 'post',
+                    url: `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream?output_format=ulaw_8000`,
+                    headers: {
+                        'xi-api-key': ELEVENLABS_API_KEY,
+                        'Content-Type': 'application/json'
+                    },
+                    data: { text: cannedReply, model_id: "eleven_multilingual_v2" },
+                    responseType: 'stream'
+                });
+                if (ws.readyState === ws.OPEN) {
+                    ws.send(JSON.stringify({ event: 'clear', streamSid }));
+                }
+                let isFirstChunk = true;
+                const stream = ttsResponse.data;
+                stream.on('data', (chunk) => {
+                    let dataToSend = chunk;
+                    if (isFirstChunk) {
+                        isFirstChunk = false;
+                        if (chunk.length >= 44 && chunk[0] === 0x52 && chunk[1] === 0x49) {
+                            dataToSend = chunk.subarray(44);
+                        }
+                    }
+                    const mediaMessage = {
+                        event: 'media',
+                        streamSid: streamSid,
+                        media: { payload: dataToSend.toString('base64'), track: 'outbound' }
+                    };
+                    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(mediaMessage));
+                });
+            } catch (ttsErr) {
+                console.error("❌ TTS (canned reply):", ttsErr.message);
+            }
+            return false;
+        }
+        lastCallerTranscript = transcriptNorm || lastCallerTranscript; 
 
         // Update History
         conversationLog += `\nUser: ${responseJson.transcript}\nDispatcher: ${responseJson.reply}`;
@@ -407,32 +565,69 @@ async function processAudio(audioData, ws, streamSid) {
         });
 
         // ═══════════════════════════════════════════════════════════════════════════════
-        // BUILD AND BROADCAST INTEL
+        // FIREBASE: Save caller message with priority, sentiment, location, main concern
         // ═══════════════════════════════════════════════════════════════════════════════
         const intelData = responseJson.intel || {};
+        const sentimentResult = sentiment.analyze(responseJson.transcript);
+        const sentimentLabel = sentimentResult.score > 0 ? 'positive' : sentimentResult.score < 0 ? 'negative' : 'neutral';
+        const timestamp = new Date().toISOString();
+        if (callId) {
+            await saveMessage(callId, {
+                role: 'caller',
+                text: responseJson.transcript,
+                timestamp,
+                mainConcern: responseJson.main_concern || formatIncidentType(responseJson.scenario_detected),
+                locationMentioned: intelData.location_mentioned || null,
+                priority: intelData.priority || null,
+                sentiment: sentimentLabel,
+                emotion: responseJson.caller_sentiment || null
+            });
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════════════
+        // BUILD AND BROADCAST INTEL
+        // ═══════════════════════════════════════════════════════════════════════════════
         const scenarioProtocols = buildProtocols(responseJson.scenario_detected, intelData);
         const resources = buildResources(responseJson.scenario_detected, intelData);
         
-        // Build location object if address was mentioned
+        // Build location object from address string via OpenStreetMap Nominatim
         let locationObj = null;
-        if (intelData.location_mentioned) {
-            // Use a default location for demo, in production you'd geocode
-            locationObj = {
-                address: intelData.location_mentioned.toUpperCase(),
-                lat: 40.7589 + (Math.random() - 0.5) * 0.01,
-                lng: -73.9851 + (Math.random() - 0.5) * 0.01,
-                sector: `SECTOR ${Math.floor(Math.random() * 12) + 1}-${String.fromCharCode(65 + Math.floor(Math.random() * 7))}`
-            };
+        const locationMentioned = (intelData.location_mentioned || '').trim();
+        if (locationMentioned) {
+            console.log('📍 Geocoding caller address:', locationMentioned);
+            const geocoded = await geocodeAddress(locationMentioned);
+            if (geocoded) {
+                locationObj = {
+                    address: geocoded.address.toUpperCase(),
+                    lat: geocoded.lat,
+                    lng: geocoded.lng,
+                    sector: sectorFromLatLng(geocoded.lat, geocoded.lng)
+                };
+                console.log('📍 Geocode result:', locationObj.address, `(${locationObj.lat}, ${locationObj.lng})`, locationObj.sector);
+            } else {
+                console.warn('📍 Geocode returned null for:', locationMentioned);
+            }
         }
         
         currentCallState.intel = {
             incidentType: formatIncidentType(responseJson.scenario_detected),
             priority: intelData.priority || "MEDIUM",
             location: locationObj || currentCallState.intel?.location || null,
+            pendingAddress: locationObj ? null : (locationMentioned || null),
             protocols: scenarioProtocols,
             resources: resources,
             summary: intelData.key_details || "Gathering information..."
         };
+
+        // Firebase: update call summary (main concern, location, priority, running summary)
+        if (callId) {
+            await updateCallSummary(callId, {
+                mainConcern: currentCallState.intel.incidentType,
+                locationToldByCaller: intelData.location_mentioned || (currentCallState.intel?.location?.address) || null,
+                priority: currentCallState.intel.priority,
+                summary: currentCallState.intel.summary
+            });
+        }
         
         broadcastToDashboard({
             type: 'intel',
@@ -443,21 +638,41 @@ async function processAudio(audioData, ws, streamSid) {
         // ═══════════════════════════════════════════════════════════════════════════════
         // TTS via ElevenLabs
         // ═══════════════════════════════════════════════════════════════════════════════
-        const voiceId = "JBFqnCBsd6RMkjVDRZzb"; 
-        
-        const response = await axios({
-            method: 'post',
-            url: `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream?output_format=ulaw_8000`,
-            headers: { 
-                'xi-api-key': ELEVENLABS_API_KEY,
-                'Content-Type': 'application/json'
-            },
-            data: {
-                text: responseJson.reply, 
-                model_id: "eleven_turbo_v2"
-            },
-            responseType: 'stream'
-        });
+        const voiceId = "JBFqnCBsd6RMkjVDRZzb";
+
+        let ttsResponse;
+        try {
+            ttsResponse = await axios({
+                method: 'post',
+                url: `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream?output_format=ulaw_8000`,
+                headers: {
+                    'xi-api-key': ELEVENLABS_API_KEY,
+                    'Content-Type': 'application/json'
+                },
+                data: {
+                    text: responseJson.reply,
+                    model_id: "eleven_multilingual_v2"
+                },
+                responseType: 'stream'
+            });
+        } catch (ttsError) {
+            const status = ttsError.response?.status;
+            const msg = status === 403
+                ? 'ElevenLabs 403 Forbidden – check API key and that your plan allows this voice/endpoint.'
+                : status === 401
+                    ? 'ElevenLabs 401 Unauthorized – invalid API key.'
+                    : status === 429
+                        ? 'ElevenLabs 429 – quota/credits exceeded.'
+                        : ttsError.message;
+            console.error("❌ ELEVENLABS ERROR:", msg);
+            broadcastToDashboard({
+                type: 'transcript',
+                speaker: 'SYSTEM',
+                text: `── TTS ERROR ── ${msg} ──`,
+                timestamp: new Date().toISOString()
+            });
+            return false;
+        }
 
         if (ws.readyState === ws.OPEN) {
             ws.send(JSON.stringify({ event: 'clear', streamSid }));
@@ -471,8 +686,17 @@ async function processAudio(audioData, ws, streamSid) {
             timestamp: new Date().toISOString()
         });
 
+        // Firebase: save AI reply message
+        if (callId) {
+            await saveMessage(callId, {
+                role: 'ai',
+                text: responseJson.reply,
+                timestamp: new Date().toISOString()
+            });
+        }
+
         let isFirstChunk = true;
-        const stream = response.data;
+        const stream = ttsResponse.data;
 
         stream.on('data', (chunk) => {
             let dataToSend = chunk;
@@ -498,7 +722,9 @@ async function processAudio(audioData, ws, streamSid) {
             console.log("🏁 DISPATCH SENT. ENDING SESSION.");
             
             // Update intel to show dispatch
-            currentCallState.intel.summary = "Help is on the way. Units dispatched to location.";
+            const finalSummary = "Help is on the way. Units dispatched to location.";
+            currentCallState.intel.summary = finalSummary;
+            if (callId) await endCall(callId, finalSummary);
             broadcastToDashboard({
                 type: 'intel',
                 data: currentCallState.intel,
@@ -510,11 +736,17 @@ async function processAudio(audioData, ws, streamSid) {
         return false;
 
     } catch (error) {
-        console.error("❌ ERROR IN AI PIPELINE:", error.message);
+        const status = error.response?.status;
+        const hint = status === 403
+            ? '403 Forbidden – check API key and permissions (Google AI or ElevenLabs).'
+            : status === 401
+                ? '401 Unauthorized – invalid or missing API key.'
+                : error.message;
+        console.error("❌ ERROR IN AI PIPELINE:", hint);
         broadcastToDashboard({
             type: 'transcript',
             speaker: 'SYSTEM',
-            text: `── PROCESSING ERROR ── ${error.message} ──`,
+            text: `── PROCESSING ERROR ── ${hint} ──`,
             timestamp: new Date().toISOString()
         });
         return false;
@@ -640,6 +872,67 @@ function buildResources(scenario, intel) {
     }
     
     return resources;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// OPENSTREETMAP NOMINATIM GEOCODING (address string → lat/lng)
+// Usage policy: max 1 req/s. We add a delay before each request.
+// ══════════════════════════════════════════════════════════════════════════════
+const geocodeCache = new Map();
+const NOMINATIM_DELAY_MS = 1100; // Stay safely above 1 req/s
+const NOMINATIM_TIMEOUT_MS = 15000;
+
+async function geocodeAddress(rawAddress) {
+    const address = String(rawAddress || '').trim();
+    if (!address) {
+        console.log('[geocode] empty address, skip');
+        return null;
+    }
+    if (geocodeCache.has(address)) {
+        console.log('[geocode] cache hit:', address);
+        return geocodeCache.get(address);
+    }
+
+    console.log('[geocode] Nominatim request:', address);
+    // Respect Nominatim rate limit (1 req/s)
+    await new Promise((r) => setTimeout(r, NOMINATIM_DELAY_MS));
+
+    try {
+        const { data } = await axios.get('https://nominatim.openstreetmap.org/search', {
+            params: { q: address, format: 'json', limit: 1, addressdetails: 1 },
+            headers: { 'User-Agent': 'UGAHacks11-DispatchCenter/1.0 (contact: local-dev)' },
+            timeout: NOMINATIM_TIMEOUT_MS
+        });
+        const result = Array.isArray(data) ? data[0] : null;
+        if (!result) {
+            console.warn('[geocode] no result for:', address);
+            return null;
+        }
+        const lat = Number(result.lat);
+        const lng = Number(result.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+            console.warn('[geocode] invalid lat/lng:', { lat, lng }, address);
+            return null;
+        }
+        const resolved = {
+            address: result.display_name || address,
+            lat,
+            lng
+        };
+        geocodeCache.set(address, resolved);
+        console.log('[geocode] resolved:', address, '→', lat, lng);
+        return resolved;
+    } catch (err) {
+        console.warn('[geocode] failed:', err.message || err, address);
+        return null;
+    }
+}
+
+// Derive a deterministic sector label from lat/lng
+function sectorFromLatLng(lat, lng) {
+    const n = Math.abs(Math.floor((lat * 1000) + (lng * 1000))) % 12;
+    const letter = String.fromCharCode(65 + (Math.abs(Math.floor(lat * 10)) % 7));
+    return `SECTOR ${n + 1}-${letter}`;
 }
 
 function createWavHeader(dataLength) {

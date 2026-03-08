@@ -5,7 +5,7 @@ const nextConfig = {
       {
         source: "/api/voice-agent/:path*",
         destination: `${
-          process.env.VOICE_AGENT_URL || "http://localhost:5000"
+          process.env.VOICE_AGENT_URL || "http://localhost:5050"
         }/:path*`,
       },
     ];

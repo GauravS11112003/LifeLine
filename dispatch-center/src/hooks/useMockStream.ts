@@ -135,7 +135,7 @@ const MOCK_INTEL_SNAPSHOTS: Array<{ afterIndex: number; intel: IntelData }> = [
     intel: {
       incidentType: "Structure Fire",
       priority: "HIGH",
-      location: null,
+      location: { address: "742 EVERGREEN TERRACE, SPRINGFIELD, IL, USA", lat: 39.7817, lng: -89.6501, sector: "SECTOR 4-D" },
       protocols: [
         {
           id: "fire",
@@ -157,7 +157,7 @@ const MOCK_INTEL_SNAPSHOTS: Array<{ afterIndex: number; intel: IntelData }> = [
     intel: {
       incidentType: "Structure Fire / Rescue",
       priority: "CRITICAL",
-      location: null,
+      location: { address: "742 EVERGREEN TERRACE, SPRINGFIELD, IL, USA", lat: 39.7817, lng: -89.6501, sector: "SECTOR 4-D" },
       protocols: [
         {
           id: "fire",
@@ -186,7 +186,7 @@ const MOCK_INTEL_SNAPSHOTS: Array<{ afterIndex: number; intel: IntelData }> = [
     intel: {
       incidentType: "Structure Fire / Rescue / Medical",
       priority: "CRITICAL",
-      location: null,
+      location: { address: "742 EVERGREEN TERRACE, SPRINGFIELD, IL, USA", lat: 39.7817, lng: -89.6501, sector: "SECTOR 4-D" },
       protocols: [
         {
           id: "fire",
@@ -228,7 +228,7 @@ const MOCK_INTEL_SNAPSHOTS: Array<{ afterIndex: number; intel: IntelData }> = [
     intel: {
       incidentType: "Structure Fire / Child Rescue",
       priority: "CRITICAL",
-      location: null,
+      location: { address: "742 EVERGREEN TERRACE, SPRINGFIELD, IL, USA", lat: 39.7817, lng: -89.6501, sector: "SECTOR 4-D" },
       protocols: [
         {
           id: "fire",
@@ -271,7 +271,7 @@ const MOCK_INTEL_SNAPSHOTS: Array<{ afterIndex: number; intel: IntelData }> = [
     intel: {
       incidentType: "Structure Fire / Collapse / Child Rescue",
       priority: "CRITICAL",
-      location: null,
+      location: { address: "742 EVERGREEN TERRACE, SPRINGFIELD, IL, USA", lat: 39.7817, lng: -89.6501, sector: "SECTOR 4-D" },
       protocols: [
         {
           id: "fire",
@@ -321,7 +321,7 @@ const MOCK_INTEL_SNAPSHOTS: Array<{ afterIndex: number; intel: IntelData }> = [
     intel: {
       incidentType: "Structure Fire / Gas Leak / Child Rescue",
       priority: "CRITICAL",
-      location: null,
+      location: { address: "742 EVERGREEN TERRACE, SPRINGFIELD, IL, USA", lat: 39.7817, lng: -89.6501, sector: "SECTOR 4-D" },
       protocols: [
         {
           id: "fire",
@@ -372,7 +372,7 @@ const MOCK_INTEL_SNAPSHOTS: Array<{ afterIndex: number; intel: IntelData }> = [
     intel: {
       incidentType: "Structure Fire / Gas Leak / Mass Casualty",
       priority: "CRITICAL",
-      location: null,
+      location: { address: "742 EVERGREEN TERRACE, SPRINGFIELD, IL, USA", lat: 39.7817, lng: -89.6501, sector: "SECTOR 4-D" },
       protocols: [
         {
           id: "fire",
@@ -431,6 +431,7 @@ export function useMockStream(intervalMs: number = 2000) {
   const [intel, setIntel] = useState<IntelData | null>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const durationRef = useRef<NodeJS.Timeout | null>(null);
+  const streamingIndexRef = useRef(0);
 
   // Simulate volume changes
   useEffect(() => {
@@ -471,24 +472,29 @@ export function useMockStream(intervalMs: number = 2000) {
     }
   }, [currentIndex]);
 
-  // Stream transcript lines
+  // Stream transcript lines (ref-based index so Strict Mode double-invoke doesn't add duplicates)
   useEffect(() => {
-    if (!isActive || currentIndex >= MOCK_CALL.length) return;
+    if (!isActive || streamingIndexRef.current >= MOCK_CALL.length) return;
 
     timerRef.current = setTimeout(() => {
-      const entry = MOCK_CALL[currentIndex];
-      const keywords = detectKeywords(entry.text);
+      const idx = streamingIndexRef.current;
+      if (idx >= MOCK_CALL.length) return;
 
+      const entry = MOCK_CALL[idx];
+      const keywords = detectKeywords(entry.text);
       const newLine: TranscriptLine = {
-        id: `line-${currentIndex}-${Date.now()}`,
+        id: `line-${idx}-${Date.now()}`,
         speaker: entry.speaker,
         text: entry.text,
         timestamp: getTimestamp(0),
         keywords,
       };
 
-      setLines((prev) => [...prev, newLine]);
-      setCurrentIndex((prev) => prev + 1);
+      streamingIndexRef.current = idx + 1;
+      setLines((prev) =>
+        prev.some((l) => l.id === newLine.id) ? prev : [...prev, newLine]
+      );
+      setCurrentIndex(streamingIndexRef.current);
 
       if (keywords.length > 0) {
         setDetectedProtocols((prev) => {
@@ -501,9 +507,10 @@ export function useMockStream(intervalMs: number = 2000) {
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
-  }, [isActive, currentIndex, intervalMs]);
+  }, [isActive, intervalMs, lines.length]);
 
   const reset = useCallback(() => {
+    streamingIndexRef.current = 0;
     setLines([]);
     setCurrentIndex(0);
     setDetectedProtocols([]);
